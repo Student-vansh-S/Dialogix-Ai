@@ -3,64 +3,37 @@ import cors from "cors";
 import "dotenv/config";
 import mongoose from "mongoose";
 import chatRoutes from "./routes/chat.js";
+import authRoutes from "./routes/authRoutes.js";
 
 const app = express();
-const PORT = 8080;
+const PORT = process.env.PORT || 8080;
 
+// Middleware
 app.use(express.json());
 app.use(cors());
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+// Routes
+app.use("/api/auth", authRoutes);
+app.use("/api", chatRoutes);
 
-app.use("/api",chatRoutes);
-// app.post("/test", async (req, res) => {
-//     try {
-//         const { message } = req.body;
-
-//         if (!message) {
-//             return res.status(400).json({ error: "Message is required" });
-//         }
-
-//         const options = {
-//             method: "POST",
-//             headers: { "Content-Type": "application/json" },
-//             body: JSON.stringify({
-//                 contents: [
-//                     {
-//                         parts: [
-//                             {
-//                                 text: message, 
-//                             },
-//                         ],
-//                     },
-//                 ],
-//             }),
-//         };
-
-//         const response = await fetch(
-//             `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
-//             options
-//         );
-
-//         const data = await response.json();
-//         console.log(data.candidates[0].content.parts[0].text);
-//         res.send(data);
-//     } catch (e) {
-//         console.error("Error:", e);
-//         res.status(500).json({ error: "Something went wrong" });
-//     }
-// });
-
-app.listen(PORT, () => {
-    console.log(`Server is running on ${PORT}`);
-    connectDB();
+// Health check endpoint
+app.get("/", (req, res) => {
+  res.json({ status: "Dialogix AI backend is running" });
 });
 
-const connectDB = async()=>{
-    try{
-        await mongoose.connect(process.env.MONGODB_URL);
-        console.log("Connected to Database");
-    }catch(err){
-        console.log("Failed to connect with DB",err);
-    }
-}
+// Connect to MongoDB then start server
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGODB_URL);
+    console.log("✅ Connected to MongoDB");
+  } catch (err) {
+    console.error("❌ Failed to connect to MongoDB:", err.message);
+    console.error("⚠️ Server is running, but database-dependent features will fail.");
+  }
+};
+
+connectDB().then(() => {
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+  });
+});
