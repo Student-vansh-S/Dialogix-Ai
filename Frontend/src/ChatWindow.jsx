@@ -4,10 +4,13 @@ import { useContext, useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { ScaleLoader } from "react-spinners";
 
+const API_URL = import.meta.env.VITE_API_URL;
+const REQUEST_TIMEOUT_MS = 45000;
+
 function ChatWindow() {
   const {
     prompt, setPrompt,
-    reply, setReply,
+    setReply,
     currThreadId,
     prevChats, setPrevChats,
     setNewChat, setSidebarOpen,
@@ -23,8 +26,6 @@ function ChatWindow() {
   const abortControllerRef = useRef(null);
   const navigate = useNavigate();
 
-  const API_URL = import.meta.env.VITE_API_URL;
-
   const stopGeneration = () => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -35,7 +36,8 @@ function ChatWindow() {
   };
 
   const getReply = async () => {
-    if (!prompt.trim() || loading || isTyping) return;
+    const trimmedPrompt = prompt.trim();
+    if (!trimmedPrompt || loading || isTyping) return;
 
     setLoading(true);
     setNewChat(false);
@@ -44,23 +46,20 @@ function ChatWindow() {
     const token = localStorage.getItem("token");
     const controller = new AbortController();
     abortControllerRef.current = controller;
-
-    const options = {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        message: prompt,
-        threadId: currThreadId,
-      }),
-    };
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
     try {
-      const response = await fetch(`${API_URL}/api/chat`, options);
-      const res = await response.json();
+      const response = await fetch(`${API_URL}/api/chat`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
+        },
+        body: JSON.stringify({ message: trimmedPrompt, threadId: currThreadId }),
+      });
+
+      clearTimeout(timeoutId);
 
       if (response.status === 401) {
         localStorage.removeItem("token");
@@ -69,54 +68,49 @@ function ChatWindow() {
         return;
       }
 
-      if (!response.ok) {
-        throw new Error(res.error || "Server error");
+      if (response.status === 429) {
+        const data = await response.json().catch(() => ({}));
+        setError(data.error || "Rate limit reached. Please wait before sending another message.");
+        return;
       }
+
+      const res = await response.json();
+      if (!response.ok) throw new Error(res.error || "Server error");
 
       const isFirstMessage = prevChats.length === 0;
+      setPrevChats((prev) => [
+        ...prev,
+        { role: "user", content: trimmedPrompt },
+        { role: "assistant", content: res.reply },
+      ]);
       setReply(res.reply);
 
-      if (isFirstMessage) {
-        setFetchThreadsTrigger(prev => prev + 1);
-      }
+      if (isFirstMessage) setFetchThreadsTrigger((prev) => prev + 1);
     } catch (err) {
+      clearTimeout(timeoutId);
       if (err.name === "AbortError") {
-        console.log("Request aborted by user.");
+        if (abortControllerRef.current) setError("Request timed out. Please try again.");
       } else {
-        console.error("Chat error:", err);
-        setError("Failed to get response. Please try again.");
+        setError(err.message || "Failed to get response. Please try again.");
       }
     } finally {
       abortControllerRef.current = null;
       setLoading(false);
+      setPrompt("");
     }
   };
 
-  useEffect(() => {
-    if (prompt && reply) {
-      setPrevChats((prev) => [
-        ...prev,
-        { role: "user", content: prompt },
-        { role: "assistant", content: reply },
-      ]);
-    }
-    setPrompt("");
-  }, [reply]);
-
   const handleKeyDown = (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      getReply();
-    }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); getReply(); }
   };
 
   const handleProfileClick = () => setIsOpen(!isOpen);
 
   useEffect(() => {
     if (!isOpen) return;
-    const handleClickOutside = () => setIsOpen(false);
-    document.addEventListener("click", handleClickOutside);
-    return () => document.removeEventListener("click", handleClickOutside);
+    const close = () => setIsOpen(false);
+    document.addEventListener("click", close);
+    return () => document.removeEventListener("click", close);
   }, [isOpen]);
 
   const handleLogout = () => {
@@ -129,31 +123,21 @@ function ChatWindow() {
 
   return (
     <div className="flex-1 flex flex-col h-full relative bg-transparent overflow-hidden">
-      {/* ===== Navbar ===== */}
+      {/* Navbar */}
       <div className="h-16 flex items-center justify-between px-6 bg-white/[0.02] backdrop-blur-md border-b border-white/5 z-[80]">
         <div className="flex items-center gap-4">
-          <button
-            className="lg:hidden text-slate-400 hover:text-white transition-colors p-2 rounded-lg hover:bg-white/5"
-            onClick={() => setSidebarOpen(true)}
-          >
+          <button className="lg:hidden text-slate-400 hover:text-white transition-colors p-2 rounded-lg hover:bg-white/5" onClick={() => setSidebarOpen(true)} aria-label="Open sidebar">
             <i className="fa-solid fa-bars"></i>
           </button>
           <div className="flex items-center gap-2 cursor-pointer group">
-            <span className="font-bold text-lg bg-gradient-to-r from-slate-200 to-slate-500 bg-clip-text text-transparent">
-              Dialogix AI
-            </span>
+            <span className="font-bold text-lg bg-gradient-to-r from-slate-200 to-slate-500 bg-clip-text text-transparent">Dialogix AI</span>
             <i className="fa-solid fa-caret-down text-[10px] text-slate-500 group-hover:text-neon-blue transition-colors"></i>
           </div>
         </div>
-
-        <div
-          className="relative group cursor-pointer"
-          onClick={(e) => { e.stopPropagation(); handleProfileClick(); }}
-        >
+        <div className="relative group cursor-pointer" onClick={(e) => { e.stopPropagation(); handleProfileClick(); }}>
           <div className="w-9 h-9 rounded-full bg-white/10 border border-white/10 flex items-center justify-center text-slate-300 hover:border-neon-blue/50 hover:text-white transition-all duration-300">
             <i className="fa-solid fa-user text-sm"></i>
           </div>
-
           {isOpen && (
             <div className="absolute top-12 right-0 w-56 p-1 bg-slate-900/90 backdrop-blur-xl border border-white/10 rounded-xl shadow-2xl z-[200] animate-fade-in" onClick={(e) => e.stopPropagation()}>
               <div className="px-4 py-2 text-[10px] uppercase tracking-widest text-slate-500 font-bold border-b border-white/5 mb-1">Account</div>
@@ -172,11 +156,9 @@ function ChatWindow() {
         </div>
       </div>
 
-      {/* ===== Chat Messages ===== */}
+      {/* Chat Messages */}
       <div className="flex-1 overflow-hidden flex flex-col relative">
         <Chat />
-
-        {/* Loading Indicator */}
         {loading && (
           <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-slate-900/80 backdrop-blur-md px-4 py-2 rounded-full border border-white/5 flex items-center gap-3 shadow-xl">
             <ScaleLoader color="#00d1ff" loading={loading} height={12} width={2} margin={2} />
@@ -185,59 +167,37 @@ function ChatWindow() {
         )}
       </div>
 
-      {/* ===== Error Message ===== */}
+      {/* Error */}
       {error && (
         <div className="max-w-2xl mx-auto w-full px-6 mb-2">
-          <div className="bg-red-400/10 border border-red-400/20 text-red-400 text-xs py-2 px-4 rounded-lg text-center backdrop-blur-sm">
-            {error}
+          <div className="bg-red-400/10 border border-red-400/20 text-red-400 text-xs py-2 px-4 rounded-lg text-center backdrop-blur-sm flex items-center justify-center gap-2">
+            <span>{error}</span>
+            <button onClick={() => setError(null)} className="text-red-400/60 hover:text-red-400 ml-2" aria-label="Dismiss">
+              <i className="fa-solid fa-xmark text-xs"></i>
+            </button>
           </div>
         </div>
       )}
 
-      {/* ===== Input Area ===== */}
+      {/* Input */}
       <div className="w-full px-4 pb-10 pt-4 flex flex-col items-center">
         <div className="w-full max-w-[700px] relative group transition-all duration-300">
-          <div className="flex items-center bg-white bg-opacity-5 backdrop-blur-xl border border-white border-opacity-10 rounded-[28px] px-5 py-2.5 shadow-[0px_0px_12px_rgba(0,209,255,0.15)] focus-within:shadow-[0px_0px_20px_rgba(0,209,255,0.3)] focus-within:border-neon-blue focus-within:border-opacity-30 transition-all duration-300 outline-none">
-            <textarea
-              ref={inputRef}
-              rows="1"
-              placeholder="Ask anything..."
-              className="flex-1 bg-transparent border-none outline-none text-white py-3 pr-4 text-base focus:ring-0 focus:outline-none resize-none placeholder:text-slate-500 custom-scrollbar max-h-48"
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              onKeyDown={handleKeyDown}
-              disabled={loading}
-              style={{ minHeight: '44px' }}
-            />
-
+          <div className="flex items-center bg-white bg-opacity-5 backdrop-blur-xl border border-white border-opacity-10 rounded-[28px] px-5 py-2.5 shadow-[0px_0px_12px_rgba(0,209,255,0.15)] focus-within:shadow-[0px_0px_20px_rgba(0,209,255,0.3)] focus-within:border-neon-blue focus-within:border-opacity-30 transition-all duration-300">
+            <textarea ref={inputRef} rows="1" placeholder="Ask anything..." className="flex-1 bg-transparent border-none outline-none text-white py-3 pr-4 text-base focus:ring-0 focus:outline-none resize-none placeholder:text-slate-500 custom-scrollbar max-h-48" value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={handleKeyDown} disabled={loading} style={{ minHeight: '44px' }} maxLength={10000} aria-label="Message input" />
             <div className="flex items-center justify-center shrink-0">
               {isGenerating ? (
-                <button
-                  onClick={stopGeneration}
-                  className="w-10 h-10 flex items-center justify-center rounded-2xl bg-red-400 bg-opacity-10 text-red-400 hover:bg-opacity-20 hover:scale-105 transition-all border border-red-400 border-opacity-20"
-                >
+                <button onClick={stopGeneration} className="w-10 h-10 flex items-center justify-center rounded-2xl bg-red-400 bg-opacity-10 text-red-400 hover:bg-opacity-20 hover:scale-105 transition-all border border-red-400 border-opacity-20" aria-label="Stop generation">
                   <i className="fa-solid fa-stop text-sm"></i>
                 </button>
               ) : (
-                <button
-                  onClick={getReply}
-                  disabled={!prompt.trim()}
-                  className={`
-                    w-10 h-10 flex items-center justify-center rounded-2xl transition-all active:scale-95
-                    ${prompt.trim()
-                      ? "bg-neon-blue text-slate-950 shadow-[0_0_12px_rgba(0,209,255,0.3)] hover:scale-105 hover:shadow-[0_0_20px_rgba(0,209,255,0.5)]"
-                      : "bg-white bg-opacity-5 text-slate-500 border border-white border-opacity-5 cursor-not-allowed"}
-                  `}
-                >
+                <button onClick={getReply} disabled={!prompt.trim()} className={`w-10 h-10 flex items-center justify-center rounded-2xl transition-all active:scale-95 ${prompt.trim() ? "bg-neon-blue text-slate-950 shadow-[0_0_12px_rgba(0,209,255,0.3)] hover:scale-105 hover:shadow-[0_0_20px_rgba(0,209,255,0.5)]" : "bg-white bg-opacity-5 text-slate-500 border border-white border-opacity-5 cursor-not-allowed"}`} aria-label="Send message">
                   <i className="fa-solid fa-paper-plane text-sm"></i>
                 </button>
               )}
             </div>
           </div>
         </div>
-        <p className="text-[10px] text-center mt-4 text-slate-600 font-bold uppercase tracking-widest opacity-60">
-          Powered by Dialogix Intelligence
-        </p>
+        <p className="text-[10px] text-center mt-4 text-slate-600 font-bold uppercase tracking-widest opacity-60">Powered by Dialogix Intelligence</p>
       </div>
     </div>
   );

@@ -1,3 +1,35 @@
-Frontend/node_modules
-backend/node_modules
+# Dependencies
+node_modules/
+package-lock.json
+
+# Environment variables (NEVER commit these)
 .env
+.env.local
+.env.*.local
+
+# Build outputs
+dist/
+dist-ssr/
+build/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Misc
+*.local
+.cache/

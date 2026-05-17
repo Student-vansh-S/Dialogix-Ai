@@ -1,10 +1,15 @@
+/**
+ * Gemini AI Utility
+ * Sends messages to Google Gemini API with retry logic,
+ * model fallback chain, and request timeouts.
+ */
 import "dotenv/config";
 import { GoogleGenAI } from "@google/genai";
 
-// Initialize the Google GenAI client with the API key from environment
+// Initialize the Google GenAI client
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// Fallback model chain — tries each in order when a model is unavailable
+// Fallback model chain — tries each model in order when one is unavailable
 const MODEL_CHAIN = [
   "gemini-2.5-flash",
   "gemini-2.0-flash",
@@ -12,10 +17,12 @@ const MODEL_CHAIN = [
 ];
 
 const MAX_RETRIES = 3;
-const BASE_DELAY_MS = 1000; // 1 second base delay for exponential backoff
+const BASE_DELAY_MS = 1000;
+const REQUEST_TIMEOUT_MS = 30000; // 30 second timeout per API call
+const MAX_MESSAGE_LENGTH = 10000;
 
 /**
- * Returns true if the error is a transient 503 / UNAVAILABLE error
+ * Returns true if the error is a transient 503/UNAVAILABLE error
  * that is safe to retry or fall back from.
  */
 const isUnavailableError = (err) => {
@@ -34,24 +41,52 @@ const isUnavailableError = (err) => {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * Wraps a promise with a timeout. Rejects if the promise doesn't
+ * resolve within the specified duration.
+ */
+const withTimeout = (promise, ms) => {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Request timed out after ${ms}ms`));
+    }, ms);
+
+    promise
+      .then((result) => {
+        clearTimeout(timer);
+        resolve(result);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+};
+
+/**
  * Tries a single Gemini model with exponential-backoff retries.
- * Throws the last error if all retries are exhausted.
+ * Each attempt has a 30s timeout.
  */
 const tryModelWithRetry = async (model, message) => {
   let lastErr;
+
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const response = await ai.models.generateContent({
-        model,
-        contents: message,
-      });
+      const response = await withTimeout(
+        ai.models.generateContent({
+          model,
+          contents: message,
+        }),
+        REQUEST_TIMEOUT_MS
+      );
+
       return response.text;
     } catch (err) {
       lastErr = err;
-      if (!isUnavailableError(err)) {
-        // Not a transient error — no point retrying
-        throw err;
+
+      if (!isUnavailableError(err) && !err.message.includes("timed out")) {
+        throw err; // Non-transient error — no point retrying
       }
+
       const delay = BASE_DELAY_MS * Math.pow(2, attempt); // 1s, 2s, 4s
       console.warn(
         `[Gemini] Model "${model}" unavailable (attempt ${attempt + 1}/${MAX_RETRIES}). Retrying in ${delay}ms…`
@@ -59,6 +94,7 @@ const tryModelWithRetry = async (model, message) => {
       await sleep(delay);
     }
   }
+
   throw lastErr;
 };
 
@@ -69,14 +105,19 @@ const tryModelWithRetry = async (model, message) => {
  *
  * @param {string} message - The user's message to send to Gemini
  * @returns {Promise<string>} The AI-generated response text
- * @throws {Error} If the message is empty or all models/retries fail
+ * @throws {Error} If the message is empty/too long or all models fail
  */
 const getGeminiResponse = async (message) => {
-  if (!message) {
-    throw new Error("Message is required");
+  if (!message || typeof message !== "string") {
+    throw new Error("Message is required and must be a string");
+  }
+
+  if (message.length > MAX_MESSAGE_LENGTH) {
+    throw new Error(`Message exceeds maximum length of ${MAX_MESSAGE_LENGTH} characters`);
   }
 
   let lastErr;
+
   for (const model of MODEL_CHAIN) {
     try {
       console.log(`[Gemini] Using model: ${model}`);
@@ -84,19 +125,21 @@ const getGeminiResponse = async (message) => {
       return text;
     } catch (err) {
       lastErr = err;
-      if (isUnavailableError(err)) {
+
+      if (isUnavailableError(err) || (err.message && err.message.includes("timed out"))) {
         console.warn(
           `[Gemini] Model "${model}" exhausted all retries. Trying next fallback…`
         );
-        continue; // Try the next model in the chain
+        continue;
       }
-      // Non-transient error — surface it immediately
-      console.error("Gemini API Error:", err.message || err);
+
+      // Non-transient error — surface immediately
+      console.error("[Gemini] API Error:", err.message || err);
       throw new Error("Failed to get response from Gemini API");
     }
   }
 
-  // All models failed
+  // All models exhausted
   console.error("[Gemini] All models in the fallback chain are unavailable.");
   throw new Error(
     "Gemini API is currently experiencing high demand. Please try again in a moment."
@@ -104,4 +147,3 @@ const getGeminiResponse = async (message) => {
 };
 
 export default getGeminiResponse;
-

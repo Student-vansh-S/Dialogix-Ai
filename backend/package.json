@@ -1,7 +1,8 @@
 {
-  "name": "chatgpt-backend",
+  "name": "dialogix-ai-backend",
   "version": "1.0.0",
   "type": "module",
+  "description": "Dialogix AI — Backend API server with authentication and Gemini AI integration",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js"
@@ -9,11 +10,19 @@
   "dependencies": {
     "@google/genai": "^1.15.0",
     "bcrypt": "^6.0.0",
+    "compression": "^1.8.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
+    "express-rate-limit": "^7.5.0",
+    "express-validator": "^7.2.1",
+    "helmet": "^8.1.0",
+    "hpp": "^0.2.3",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^8.18.0",
+    "morgan": "^1.10.0"
+  },
+  "devDependencies": {
     "nodemon": "^3.1.10"
   }
 }

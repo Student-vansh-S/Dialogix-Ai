@@ -36,6 +36,7 @@ function Chat() {
     setShowScrollBtn(!near);
   }, []);
 
+  // Attach scroll listener
   useEffect(() => {
     const el = chatAreaRef.current;
     if (!el) return;
@@ -43,6 +44,7 @@ function Chat() {
     return () => el.removeEventListener("scroll", checkNearBottom);
   }, [checkNearBottom]);
 
+  // Auto-scroll when new messages arrive
   useEffect(() => {
     const newLen = prevChats?.length ?? 0;
     const oldLen = prevChatsLenRef.current;
@@ -61,18 +63,22 @@ function Chat() {
     prevChatsLenRef.current = newLen;
   }, [prevChats, scrollToBottom]);
 
+  // Auto-scroll during typing animation
   useEffect(() => {
     if (isNearBottomRef.current) {
       scrollToBottom(false);
     }
   }, [latestReply, scrollToBottom]);
 
+  // Typing animation effect
   useEffect(() => {
     if (reply === null) {
       setLatestReply(null);
       setIsTyping(false);
       return;
     }
+
+    // Don't start typing animation if there are no chats yet
     if (!prevChats?.length) return;
 
     const words = reply.split(" ");
@@ -95,8 +101,9 @@ function Chat() {
       typingIntervalRef.current = null;
       setIsTyping(false);
     };
-  }, [prevChats, reply]);
+  }, [prevChats, reply, setIsTyping]);
 
+  // Handle stop generation
   useEffect(() => {
     if (!stopRequested) return;
 
@@ -109,8 +116,25 @@ function Chat() {
     setStopRequested(false);
   }, [stopRequested, setStopRequested, setIsTyping]);
 
+  /**
+   * Determine which messages to render in the main list vs the "latest" slot.
+   * The "latest" slot is used for the typing animation on the most recent assistant reply.
+   *
+   * Fix: Only use the "latest" slot for assistant messages, not user messages.
+   */
+  const hasMessages = prevChats?.length > 0;
+  const lastMessage = hasMessages ? prevChats[prevChats.length - 1] : null;
+  const isLastAssistant = lastMessage?.role === "assistant";
+
+  // Show all messages in the main list, except the last one IF it's an assistant message
+  // (because the last assistant message gets the typing animation treatment)
+  const mainMessages = hasMessages
+    ? (isLastAssistant ? prevChats.slice(0, -1) : prevChats)
+    : [];
+
   return (
     <div className="flex-1 overflow-y-auto px-4 md:px-8 custom-scrollbar relative scroll-smooth" ref={chatAreaRef}>
+      {/* Hero section for new chat */}
       {newChat && (
         <div className="flex flex-col items-center justify-center min-h-[60vh] text-center animate-fade-in">
           <div className="w-16 h-16 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center mb-6 shadow-2xl">
@@ -122,16 +146,17 @@ function Chat() {
         </div>
       )}
 
+      {/* Chat messages */}
       <div className="max-w-4xl mx-auto w-full flex flex-col gap-6 py-10">
-        {prevChats?.slice(0, -1).map((chat, idx) => (
-          <div 
-            className={`flex flex-col ${chat.role === "user" ? "items-end" : "items-start"} animate-fade-in`} 
-            key={idx}
+        {mainMessages.map((chat, idx) => (
+          <div
+            className={`flex flex-col ${chat.role === "user" ? "items-end" : "items-start"} animate-fade-in`}
+            key={`msg-${idx}-${chat.role}`}
           >
             <div className={`
               max-w-[85%] px-5 py-3.5 rounded-2xl text-sm leading-relaxed
-              ${chat.role === "user" 
-                ? "bg-white/10 text-white border border-white/10 rounded-br-none shadow-lg" 
+              ${chat.role === "user"
+                ? "bg-white/10 text-white border border-white/10 rounded-br-none shadow-lg"
                 : "bg-white/[0.03] text-slate-300 border border-white/5 rounded-bl-none backdrop-blur-sm"}
             `}>
               {chat.role === "user" ? (
@@ -147,12 +172,13 @@ function Chat() {
           </div>
         ))}
 
-        {prevChats.length > 0 && (
-          <div className={`flex flex-col items-start animate-fade-in`} key="latest">
+        {/* Latest assistant reply with typing animation */}
+        {hasMessages && isLastAssistant && (
+          <div className="flex flex-col items-start animate-fade-in" key="latest-reply">
             <div className="max-w-[85%] px-5 py-3.5 rounded-2xl text-sm leading-relaxed bg-white/[0.03] text-slate-300 border border-white/5 rounded-bl-none backdrop-blur-sm">
               <div className="markdown-content">
                 <ReactMarkdown rehypePlugins={[rehypeHighlight]}>
-                  {latestReply === null ? prevChats[prevChats.length - 1].content : latestReply}
+                  {latestReply !== null ? latestReply : lastMessage.content}
                 </ReactMarkdown>
               </div>
             </div>
@@ -162,6 +188,7 @@ function Chat() {
         <div style={{ height: "1px" }} />
       </div>
 
+      {/* Scroll to bottom button */}
       {showScrollBtn && (
         <button
           className="fixed bottom-32 right-8 w-10 h-10 rounded-full bg-slate-900/80 backdrop-blur-md border border-white/10 text-slate-400 hover:text-white hover:border-neon-blue/50 flex items-center justify-center transition-all duration-300 shadow-2xl z-50 animate-bounce"
@@ -170,6 +197,7 @@ function Chat() {
             setShowScrollBtn(false);
             scrollToBottom(true);
           }}
+          aria-label="Scroll to bottom"
         >
           <i className="fa-solid fa-chevron-down"></i>
         </button>

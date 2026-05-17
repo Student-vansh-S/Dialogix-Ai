@@ -1,88 +1,126 @@
+/**
+ * Chat Routes
+ * Handles thread CRUD operations and AI chat messaging.
+ */
 import express from "express";
 import mongoose from "mongoose";
 import Thread from "../models/Threads.js";
 import getGeminiResponse from "../utils/gemini.js";
 import { protect } from "../middleware/authMiddleware.js";
+import { chatLimiter, apiLimiter } from "../middleware/rateLimiter.js";
+import { validateChat } from "../middleware/validate.js";
 
 const router = express.Router();
 
-// Protect all chat routes
+// All chat routes require authentication
 router.use(protect);
 
-// Get all threads (sorted by most recent)
-router.get("/thread", async (req, res) => {
+/**
+ * @desc    Get all threads for the authenticated user (sorted by most recent)
+ * @route   GET /api/thread
+ * @access  Private
+ */
+router.get("/thread", apiLimiter, async (req, res, next) => {
   try {
     if (mongoose.connection.readyState !== 1) {
-       return res.json([]); // Return empty threads if DB is down
+      return res.json([]);
     }
-    const threads = await Thread.find({ userId: req.user._id }).sort({ updatedAt: -1 });
+
+    const threads = await Thread.find({ userId: req.user._id })
+      .sort({ updatedAt: -1 })
+      .select("threadId title updatedAt")
+      .lean(); // .lean() for read-only performance boost
+
     res.json(threads);
   } catch (err) {
-    console.error("Failed to fetch threads:", err);
-    res.status(500).json({ error: "Failed to fetch threads" });
+    next(err);
   }
 });
 
-// Get a specific thread by threadId
-router.get("/thread/:threadId", async (req, res) => {
+/**
+ * @desc    Get a specific thread's messages
+ * @route   GET /api/thread/:threadId
+ * @access  Private
+ */
+router.get("/thread/:threadId", apiLimiter, async (req, res, next) => {
   const { threadId } = req.params;
+
   try {
     if (mongoose.connection.readyState !== 1) {
-       return res.json([]);
+      return res.json([]);
     }
-    const thread = await Thread.findOne({ threadId, userId: req.user._id });
+
+    const thread = await Thread.findOne({
+      threadId,
+      userId: req.user._id,
+    }).lean();
+
     if (!thread) {
       return res.status(404).json({ error: "Thread not found" });
     }
+
     res.json(thread.messages);
   } catch (err) {
-    console.error("Failed to fetch chat:", err);
-    res.status(500).json({ error: "Failed to fetch chat" });
+    next(err);
   }
 });
 
-// Delete a thread
-router.delete("/thread/:threadId", async (req, res) => {
+/**
+ * @desc    Delete a thread
+ * @route   DELETE /api/thread/:threadId
+ * @access  Private
+ */
+router.delete("/thread/:threadId", async (req, res, next) => {
   const { threadId } = req.params;
+
   try {
     if (mongoose.connection.readyState !== 1) {
-       return res.status(200).json({ success: "Simulated delete successful" });
+      return res.status(503).json({ error: "Database unavailable. Please try again later." });
     }
-    const deletedThread = await Thread.findOneAndDelete({ threadId, userId: req.user._id });
+
+    const deletedThread = await Thread.findOneAndDelete({
+      threadId,
+      userId: req.user._id,
+    });
+
     if (!deletedThread) {
       return res.status(404).json({ error: "Thread not found" });
     }
+
     res.status(200).json({ success: "Thread deleted successfully" });
   } catch (err) {
-    console.error("Failed to delete thread:", err);
-    res.status(500).json({ error: "Failed to delete thread" });
+    next(err);
   }
 });
 
-// Send a chat message — creates thread if new, appends if existing
-router.post("/chat", async (req, res) => {
+/**
+ * @desc    Send a chat message — creates thread if new, appends if existing
+ * @route   POST /api/chat
+ * @access  Private
+ */
+router.post("/chat", chatLimiter, validateChat, async (req, res, next) => {
   const { threadId, message } = req.body;
 
-  if (!threadId || !message) {
-    return res.status(400).json({ error: "Missing required fields" });
-  }
-
   try {
-    // If DB is not connected, bypass DB completely to avoid 10s timeouts
+    // If DB is disconnected, bypass DB to avoid timeouts but still get AI response
     if (mongoose.connection.readyState !== 1) {
-       console.log("DB disconnected, using fallback Gemini response");
-       const assistantReply = await getGeminiResponse(message);
-       return res.json({ reply: assistantReply });
+      const assistantReply = await getGeminiResponse(message);
+      return res.json({ reply: assistantReply });
     }
 
     let thread = await Thread.findOne({ threadId, userId: req.user._id });
 
     if (!thread) {
-      // Create a new thread with the first user message
+      // Create new thread — sanitize title from user input
+      const sanitizedTitle = message
+        .replace(/[<>]/g, "") // Strip HTML angle brackets
+        .substring(0, 60)
+        .trim();
+
       thread = new Thread({
         threadId,
         userId: req.user._id,
-        title: message.length > 60 ? message.substring(0, 60) + "..." : message,
+        title: sanitizedTitle + (message.length > 60 ? "..." : ""),
         messages: [{ role: "user", content: message }],
       });
     } else {
@@ -92,35 +130,38 @@ router.post("/chat", async (req, res) => {
     // Get AI response from Gemini
     const assistantReply = await getGeminiResponse(message);
 
+    // Save to DB (non-blocking — still return reply even if save fails)
     try {
       thread.messages.push({ role: "assistant", content: assistantReply });
-      thread.updatedAt = new Date();
       await thread.save();
     } catch (dbErr) {
-      console.error("MongoDB save skipped due to error:", dbErr.message);
-      // Fallback: still return the reply even if DB fails to save
+      console.error("[DB] Failed to save thread:", dbErr.message);
     }
 
     res.json({ reply: assistantReply });
   } catch (err) {
-    console.error("Chat error:", err.message || err);
+    // Handle DB timeout errors — still try to get AI response
+    const isDbError =
+      err.name === "MongooseError" ||
+      (err.message && (err.message.includes("buffering timed out") || err.message.includes("topology")));
 
-    // If the error was from DB when trying to find the thread initially, we can still call Gemini
-    if (err.name === 'MongooseError' || err.message.includes('buffering timed out') || err.message.includes('topology')) {
+    if (isDbError) {
       try {
-        const fallbackReply = await getGeminiResponse(message);
+        const fallbackReply = await getGeminiResponse(req.body.message);
         return res.json({ reply: fallbackReply });
       } catch (apiErr) {
-        return res.status(503).json({ error: apiErr.message || "AI API is unavailable. Please try again." });
+        return res.status(503).json({
+          error: apiErr.message || "AI service is unavailable. Please try again.",
+        });
       }
     }
 
-    // Surface Gemini high-demand errors with a clear message
+    // Surface Gemini high-demand errors clearly
     if (err.message && err.message.includes("high demand")) {
       return res.status(503).json({ error: err.message });
     }
 
-    res.status(500).json({ error: "Something went wrong! Please try again." });
+    next(err);
   }
 });
 
